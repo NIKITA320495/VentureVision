@@ -8,7 +8,8 @@ from langchain_core.prompts import PromptTemplate
 from langchain_google_community import GoogleSearchAPIWrapper
 from langchain.tools import Tool
 import os
-from agents import extract, run_market_analysis_agent, run_competitive_analysis_agent, financial_analysis
+import asyncio
+from agents import extract, run_market_analysis_agent, run_competitive_analysis_agent, financial_analysis, combined_agent
 
 # --- Streamlit Application Layout ---
 st.set_page_config(page_title="VentureVision: Your AI Business Analyzer", layout="wide")
@@ -56,29 +57,34 @@ if st.button("Analyze Business Idea", key="analyze_button"):
             # Conditional rendering based on sidebar selection
             if analysis_type == "Overall Business Analysis":
                 st.markdown("---")
-                st.subheader("📊 Overall Business Analysis (Market, Financial, Location & Mentor)")
+                st.subheader("📊 Overall Business Analysis (Market, Financial, Location & Strategy)")
 
-                # Market Analysis
-                with st.spinner("Performing market analysis... This might take a moment."):
-                    market_analysis_result = run_market_analysis_agent(business_type, location_location, project_description)
-                    st.success("Market analysis complete!")
-                    st.markdown("### Market Analysis")
-                    st.markdown(market_analysis_result)
+                with st.spinner("Performing in-depth analysis... This may take a few moments."):
+                    try:
+                        analysis_result =  asyncio.run(combined_agent(user_input))
+                        st.success(" Analysis complete!")
 
-                # Financial Analysis
-                with st.spinner("Performing financial analysis..."):
-                    # Assuming a default budget for now, as it's not extracted
-                    financial_analysis_result = financial_analysis(business_type, location_location, project_description, budget="N/A (user-defined budget not extracted)")
-                    st.success("Financial analysis complete!")
-                    st.markdown("### Financial Analysis")
-                    st.markdown(financial_analysis_result)
+                        # Display extracted info
+                        if isinstance(analysis_result, dict):
+                            st.markdown(analysis_result)
+                            st.markdown("#### 🌍 Market Trends")
+                            st.markdown(analysis_result.get("market_analysis", "No data available."))
+                            st.markdown("#### 💰 Competitors")
+                            st.markdown(analysis_result.get("competitive_analysis", "No data available."))
+                            st.markdown("#### 📈 Financial Overview")
+                            st.markdown(analysis_result.get("financial_analysis", "No data available."))
+                            st.markdown("#### 📝 Executive Summary")
+                            st.markdown(analysis_result.get("executive_summary", "No data available."))
 
+                    except Exception as e:
+                        st.error(f"❌ Error occurred during analysis: {e}")
+                
 
             elif analysis_type == "Market Research Analysis":
                 st.markdown("---")
                 st.subheader("📊 Market Research Analysis")
                 with st.spinner("Performing market analysis... This might take a moment."):
-                    market_analysis_result = run_market_analysis_agent(business_type, location_location, project_description)
+                    market_analysis_result = asyncio.run(run_market_analysis_agent(business_type, location_location, project_description))
                     st.success("Market analysis complete!")
 
                     # ---- BEAUTIFY MARKET ANALYSIS REPORT ----
@@ -114,7 +120,7 @@ if st.button("Analyze Business Idea", key="analyze_button"):
                 st.markdown("---")
                 st.subheader("🏁 Competitive Analysis")
                 with st.spinner("Performing competitive analysis... This might take a moment."):
-                    competitive_analysis_result = run_competitive_analysis_agent(business_type, location_location, project_description)
+                    competitive_analysis_result = asyncio.run(run_competitive_analysis_agent(business_type, location_location, project_description))
                     st.success("Competitive analysis complete!")
 
                     if isinstance(competitive_analysis_result, dict):
@@ -148,12 +154,11 @@ if st.button("Analyze Business Idea", key="analyze_button"):
                 st.subheader("💰 Financial Analysis")
                 with st.spinner("Performing financial analysis..."):
                     # Assuming a default budget for now, as it's not extracted by 'extract'
-                    financial_analysis_result = financial_analysis(
+                    financial_analysis_result = asyncio.run(financial_analysis(
                         business_type,
                         location_location,
                         project_description,
-                        budget="N/A (user-defined budget not extracted)"
-                    )
+                    ))
                     st.success("Financial analysis complete!")
 
                     if isinstance(financial_analysis_result, dict):
@@ -175,14 +180,7 @@ if st.button("Analyze Business Idea", key="analyze_button"):
                         st.markdown("#### 🧭 Strategic Recommendations")
                         st.markdown(financial_analysis_result.get("strategic_recommendations", "No data available."))
 
-                        # Display resources/sources if present
-                        resources = financial_analysis_result.get("resources", [])
-                        if resources:
-                            st.markdown("#### 🔗 Resources")
-                            for res in resources:
-                                st.markdown(
-                                    f"- [{res.get('title','Source')}]({res.get('url','#')}) — {res.get('summary','')}"
-                                )
+                        
                     else:
                         st.markdown(financial_analysis_result)
 

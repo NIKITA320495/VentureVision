@@ -9,12 +9,9 @@ from langchain_google_community import GoogleSearchAPIWrapper
 from langchain.tools import Tool
 from pydantic import BaseModel
 import os
-
-from dotenv import load_dotenv
-import os
-
-# Load environment variables from .env file
-load_dotenv()
+from typing import Dict, Any
+from datetime import datetime
+import asyncio 
 
 google_api_key_gemini = os.getenv("GOOGLE_API_KEY_GEMINI")
 google_api_key_cse = os.getenv("GOOGLE_API_KEY_CSE")
@@ -53,6 +50,27 @@ class FinancialAnalysisResponse(BaseModel):
     profit_margins: str 
     financial_risks: str 
     strategic_recommendations: str 
+
+class CombinedResponse(BaseModel):
+    """
+    Represents the combined response from the orchestrator agent.
+    Contains the market, competitive, and financial analysis results.
+    """
+    market_analysis: str
+    competitive_analysis: str
+    financial_analysis: str
+    executive_summary: str
+
+
+def get_current_date() -> str:
+    """Returns the current date in YYYY-MM-DD format."""
+    return datetime.now().strftime("%Y-%m-%d")
+
+date_tool = Tool(
+    name="current_date",
+    func=get_current_date,
+    description="Returns the current date. Useful for determining the recency of information."
+)
 
 ########################################################
 ############ User Intent Agent ##################
@@ -135,7 +153,51 @@ search_tool = Tool(
     description="Tool for performing Google searches to find information on the web."
 )
 
-def run_market_analysis_agent(business: str, location: str, description: str) -> dict:
+def google_trends_insight(term: str, timeframe: str = 'today 12-m') -> str:
+    """
+    Provides search trend analysis for a given term using Google Trends data.
+
+    Args:
+        term (str): The keyword or business term to analyze.
+        timeframe (str): Timeframe to fetch data (e.g., 'today 12-m' for last 12 months).
+
+    Returns:
+        str: A summary of the trend over the specified time.
+    """
+    try:
+        pytrends = TrendReq(hl='en-US', tz=330)
+        pytrends.build_payload([term], cat=0, timeframe=timeframe, geo='', gprop='')
+
+        # Interest over time
+        data = pytrends.interest_over_time()
+        if data.empty:
+            return f"No trend data found for '{term}'."
+
+        latest = data[term].iloc[-1]
+        peak = data[term].max()
+        mean_trend = data[term].mean()
+
+        trend_summary = f"""
+ Google Trends Summary for **{term}** ({timeframe}):
+- Peak Interest: {peak}
+- Latest Interest Level: {latest}
+- Average Interest: {mean_trend:.2f}
+-  Timeframe: {timeframe}
+
+The term '{term}' has shown a {'rising' if latest > mean_trend else 'declining'} trend in search interest recently.
+        """.strip()
+
+        return trend_summary
+
+    except Exception as e:
+        return f"Error fetching trend data for '{term}': {e}"
+trendtool = Tool(
+    name="googletrends",
+    func=google_trends_insight,
+    description="Tool for performing Google Trends analysis to find search interest trends for a given term."
+)
+
+async def run_market_analysis_agent(business: str, location: str, description: str) -> dict:
     """
     Runs an AI agent to perform deep market research analysis based on the provided business type, location, and description.
     The agent uses a search tool to gather relevant market information and then synthesizes it.
@@ -160,7 +222,7 @@ def run_market_analysis_agent(business: str, location: str, description: str) ->
     # Create the ReAct agent
     agent = create_react_agent(
         model=llm,
-        tools=[search_tool],
+        tools=[search_tool,trendtool],
         response_format=MarketAnalysisResponse,
         prompt="""
 You are an elite market research analyst, renowned for delivering in-depth, data-driven, and actionable reports for new business ventures. Your mission is to provide a comprehensive market analysis for a proposed startup, using the latest available data and strategic insight.
@@ -175,6 +237,7 @@ Use the 'search' tool to collect the most relevant, up-to-date, and credible inf
 -   **Target Customer Demographics & Behavior:** Ideal customer profile, their needs, preferences, pain points, and purchasing habits .
 -   **Regulatory Environment & Legal Considerations:** Relevant laws, licenses, permits, and industry-specific regulations impacting the business.
 -   **SWOT Analysis (Strengths, Weaknesses, Opportunities, Threats):** A detailed assessment specific to the startup within the identified market.
+Use the 'googletrends' tool to analyze search interest trends for the business type and location.
 -   **Emerging Trends & Disruptors:** Any new technologies, consumer shifts, or innovations that could impact the market.
 
 Your analysis report must be:
@@ -186,7 +249,7 @@ Your analysis report must be:
 -   **Actionable:** Conclude with clear, strategic recommendations that the entrepreneur can use to make informed decisions and navigate the market successfully.
 
 
-You have access to the `search` tool to find all necessary information.Do not use any other tools or resources.Do not use your own knowledge or assumptions outside of the search results.
+You have access to the `search` tool to find all necessary information and the `googletrends` tool to analyze search interest trends for the business type and location. Do not use your own knowledge or assumptions outside of the search results.
 
 Your task is to perform the following steps:
 **Steps:**
@@ -223,7 +286,7 @@ Your final output MUST be a JSON object that strictly conforms to the following 
     }
 
     try:
-        result = agent.invoke(agent_input)
+        result = await agent.ainvoke(agent_input)
         structured = result.get('structured_response', result)
         if isinstance(structured, MarketAnalysisResponse):
             return structured.dict()
@@ -268,7 +331,7 @@ Your competitive analysis must thoroughly address the following aspects:
 - Key Competitors: Identify and briefly describe the most significant direct and indirect competitors in the relevant market and location.
 - Competitor Profiles: For each key competitor, provide details such as business model, product/service offerings, pricing, target customers, market share (if available), and unique selling propositions.
 - Market Positioning: Analyze how the startup and its competitors are positioned in the market, including brand perception, customer segments, and competitive advantages/disadvantages.
-- Strengths & Weaknesses: Summarize the main strengths and weaknesses of each competitor as they relate to the startup’s offering.
+- Strengths & Weaknesses: Summarize the main strengths and weaknesses of each competitor as they relate to the startups offering.
 - Competitive Strategies: Outline the primary strategies employed by leading competitors (e.g., pricing, marketing, innovation, partnerships, customer service).
 - Barriers to Entry: Identify major barriers to entry in the market, such as capital requirements, regulatory hurdles, established brand loyalty, or technological advantages.
 - Opportunities & Threats: Highlight significant opportunities for differentiation as well as potential threats posed by competitors.
@@ -282,7 +345,7 @@ Your analysis report must be:
 - Insightful: Go beyond summarizing facts—interpret what the data means for this specific business idea and location, highlighting key implications and opportunities.
 - Actionable: Conclude with clear, strategic recommendations that the entrepreneur can use to make well-informed decisions and successfully compete in the market.
 
-You have access to the `search` tool to find all necessary information. Do not use any other tools or resources. Do not use your own knowledge or assumptions outside of the search results.
+You have access to the `search` tool to find all necessary information. Do not use your own knowledge or assumptions outside of the search results.
 
 Your task is to perform the following steps:
 1. Understand & Deconstruct: Fully comprehend the startup's business type, specific location (if any), and the unique aspects of its description.
@@ -299,7 +362,7 @@ Your final output MUST be a JSON object that strictly conforms to the following 
   "strengths_weaknesses": "...",
   "opportunities_threats": "...",
   "strategic_recommendations": "...",
-}
+}"
 
 Instructions:
 - Maintain a professional, objective, and data-driven tone throughout your analysis.
@@ -308,7 +371,7 @@ Instructions:
 - Ensure the final output is only the competitive analysis report in the specified JSON format, without including your internal thought process, search queries, or intermediate steps.
 """
 
-def run_competitive_analysis_agent(business: str, location: str, description: str) -> dict:
+async def run_competitive_analysis_agent(business: str, location: str, description: str) -> dict:
     """
     Runs an AI agent to perform a comprehensive competitive analysis for a startup.
     Returns a structured dictionary matching the CompetitiveAnalysisResponse schema.
@@ -335,7 +398,7 @@ def run_competitive_analysis_agent(business: str, location: str, description: st
     }
 
     try:
-        result = agent.invoke(agent_input)
+        result = await agent.ainvoke(agent_input)
         structured = result.get('structured_response', result)
         if isinstance(structured, CompetitiveAnalysisResponse):
             return structured.dict()
@@ -365,27 +428,32 @@ def run_competitive_analysis_agent(business: str, location: str, description: st
 ############################################
 ######## Financial Analysis Agent ##########
 ############################################
-
+financesearch_tool = Tool(
+    name="financesearch",
+    func=search.run,
+    description="Tool for performing financial searches to find information on startup costs, revenue potential, funding options, and profit margins."
+)
 
 FINANCIAL_ANALYSIS_PROMPT = """
 You are a top-tier financial analyst for startups. Your job is to deliver a clear, data-driven, and actionable financial analysis for a new business idea.
 
 Responsibilities:
 - Analyze the business type, location, and description to assess financial viability.
-- Use the `search` tool to gather the most relevant, up-to-date, and credible information for each aspect of the financial analysis.
+- Use the `financesearch` tool to gather the most relevant, up-to-date, and credible information for each aspect of the financial analysis.
+- **Crucially: Synthesize all information found in the search results. If precise, consolidated figures are not available, state what trends, ranges, or qualitative insights *are* present. Do not simply state "Information not available" if search results contain relevant details, even if indirect.**
 
 Your report must cover:
-- Startup Costs: Estimated costs to launch the business, with a breakdown if possible.
-- Revenue Potential: Main revenue streams, market size, and realistic revenue estimates.
-- Funding Options: Possible funding sources (e.g., loans, grants, investors) and strategies.
-- Profit Margins: Expected profit margins and what affects them in this industry.
-- Financial Risks: Major risks and how to mitigate them.
-- Strategic Recommendations: Clear, prioritized financial actions for the entrepreneur.
+- **Startup Costs:** Estimated costs to launch the business, with a breakdown. Estimated costs should be in numbers with a breakdown. 
+- **Revenue Potential:** Main revenue streams, market size, and realistic revenue estimates all should be in numbers.
+- **Funding Options:** List the specific funding sources available depending upon the business type and location, such as venture capital, angel investors, crowdfunding, or loans. Include specific funding amounts or ranges mentioned in the search results.
+- **Profit Margins:** Expected profit margins and what affects them in this industry. Report any specific profit margin percentages, ranges, or qualitative descriptions found, and discuss factors like price volatility or feed costs if mentioned. Acknowledge any conflicting data and present the different perspectives found.
+- **Financial Risks:** Major risks and how to mitigate them.
+- **Strategic Recommendations:** Clear, prioritized financial actions for the entrepreneur, derived directly from your analysis of the search results. Write 3-4 actionable recommendations based on the financial analysis.
 
 Instructions:
 - Structure your report with clear section headings as above.
-- Use recent data, statistics, and evidence from your searches.
-- If information for any section is unavailable, state "Information not available for this section."
+- **Use recent data, statistics, and direct evidence extracted from your searches.** Refer to specific findings from the search results.
+- **If *no* relevant information can be found for a specific section *after thorough searching*, then and only then, state "Information not available for this section."**
 - Output ONLY a JSON object matching this schema:
 {
   "startup_costs": "...",
@@ -395,10 +463,11 @@ Instructions:
   "financial_risks": "...",
   "strategic_recommendations": "..."
 }
-Do not include your thought process or any content outside this JSON object.
+Do not include your internal thought process, search queries, or any content outside this JSON object.
 """
 
-def financial_analysis(business: str, location: str, description: str, budget: str = "N/A") -> dict:
+
+async def financial_analysis(business: str, location: str, description: str) -> dict:
     # Example search queries for financial analysis
     queries = [
         f"startup costs for {business} in {location}",
@@ -411,6 +480,8 @@ def financial_analysis(business: str, location: str, description: str, budget: s
     for query_str in queries:
         try:
             search_results = search_tool.run(query_str)
+            print(f"Search results for '{query_str}': {search_results}")
+
             financial_results.append(f"--- Search Results for '{query_str}' ---\n{search_results}\n")
         except Exception as e:
             st.warning(f"Error performing search for '{query_str}': {e}\n")
@@ -426,7 +497,7 @@ def financial_analysis(business: str, location: str, description: str, budget: s
 
     finance_agent = create_react_agent(
         model=financial_llm,
-        tools=[search_tool],
+        tools=[financesearch_tool],
         response_format=FinancialAnalysisResponse,
         prompt=FINANCIAL_ANALYSIS_PROMPT
     )
@@ -439,22 +510,10 @@ def financial_analysis(business: str, location: str, description: str, budget: s
     }
 
     try:
-        result = finance_agent.invoke(agent_input)
+        result = await finance_agent.ainvoke(agent_input)
         structured = result.get('structured_response', result)
         print (f"Structured response: {structured}")
-        if isinstance(structured, FinancialAnalysisResponse):
-            return structured.dict()
-        elif isinstance(structured, dict):
-            return FinancialAnalysisResponse(**structured).dict()
-        else:
-            return {
-                "startup_costs": "Error: Unexpected response structure.",
-                "revenue_potential": "",
-                "funding_options": "",
-                "profit_margins": "",
-                "financial_risks": "",
-                "strategic_recommendations": "",
-            }
+        return structured.dict()
     except Exception as e:
         return {
             "startup_costs": f"Error: {e}",
@@ -464,3 +523,131 @@ def financial_analysis(business: str, location: str, description: str, budget: s
             "financial_risks": "",
             "strategic_recommendations": "",
         }
+
+############################################
+######## Combined Agent ##################
+############################################
+
+
+import asyncio
+
+
+async def combined_agent(user_query: str) -> dict:
+    """
+    Orchestrator agent that:
+    1. Extracts the business info.
+    2. Runs market, competitive, and financial agents.
+    3. Synthesizes all responses into a final executive summary.
+    """
+    # Step 1: Extract user intent
+    extracted = extract(user_query)
+    business = extracted.get("business")
+    location = extracted.get("location")
+    description = extracted.get("description", "N/A")
+
+    if not business or not location or business == "unknown":
+        return {
+            "error": "Business type or location could not be extracted.",
+            "extracted_info": extracted
+        }
+
+    # Step 2: Run sub-agents
+    market = await run_market_analysis_agent(business, location, description)
+    competition = await run_competitive_analysis_agent(business, location, description)
+    financial = await financial_analysis(business, location, description)
+
+    # Step 3: Define synthesizer agent
+    synthesis_prompt = """
+You are an expert business consultant. Your task is to write a 5-point executive summary for a proposed startup, based on its market, competitive, and financial analyses.
+
+Business: {business}
+Location: {location}
+Description: {description}
+
+Market:
+{market}
+
+Competition:
+{competition}
+
+Financial:
+{financial}
+
+**Output Task & Structure:**
+
+Your final output MUST be a valid JSON object with four top-level keys: `market_analysis`, `competitive_analysis`, `financial_analysis`, and `executive_summary`.
+
+1.  **`market_analysis` (JSON Key Content):**
+    * Identify and elaborate on the top 2-3 most significant market opportunities derived from the market analysis.
+    * Discuss the target audience, their unmet needs, and the potential for a viable customer base.
+    * Cite specific statistics or market size estimates (e.g., "a projected market size of X billion by Y year").
+    * This summary should be concise, approximately **50-60 words**, focusing on quantitative data and key insights.
+
+2.  **`competitive_analysis` (JSON Key Content):**
+    * Summarize the competitive landscape based on the competitive analysis .
+    * Identify the top 2-3 primary competitors, describe their business models, and explain how they differentiate themselves.
+    * Discuss their strengths and weaknesses.
+    * Strategically position the startup against these competitors, highlighting its unique selling propositions or identifying underserved market gaps.
+
+3.  **`financial_analysis` (JSON Key Content):**
+    * Provide a concise overview of the startup's financial health and prospects.
+    * Include details on initial costs, revenue potential, and specific funding requirements.
+    * Summarize key financial projections (e.g., initial budget, projected revenue, breakeven point).
+    * Mention any identified funding sources or requirements.
+    * Briefly outline potential financial risks and proposed mitigation strategies.
+
+4.  **`executive_summary` (JSON Key Content - This will be a single string containing the entire 5-point summary):**
+
+    Structure this executive summary as follows, ensuring a logical flow and direct integration of insights from *all* provided analyses. Each point should be a distinct paragraph or clearly delineated section within the single string.
+
+    * **1. Business Overview**: Provide a brief, compelling introduction to the startup, clearly stating its core offering, unique value proposition, and the problem it aims to solve.
+
+    * **2. Market Opportunity**: Elaborate on the identified market opportunities. Discuss the target audience and their unmet needs, leveraging specific data and statistics directly from the `market_analysis` section to quantify the potential.
+
+    * **3. Competitive Positioning**: Analyze the competitive landscape, discussing key competitors, their business models, and how the startup will strategically differentiate itself or exploit market gaps, drawing directly from the `competitive_analysis` section.
+
+    * **4. Financial Viability & Outlook**: Detail the startup's financial health, including initial costs, revenue potential, and funding needs, based on the `financial_analysis` section. Include key financial projections (e.g., initial budget, projected revenue, breakeven point) and any identified financial risks with proposed mitigation.
+
+    * **5. Strategic Recommendations**: Offer actionable and practical strategic recommendations for the founder. These recommendations should synthesize insights from all analyses, covering differentiation strategies, initial steps for market penetration, and guidance on product/service development (e.g., MVP).
+
+---
+Your final output MUST be a JSON object that strictly conforms to the following schema:
+
+    {
+    "market_analysis": "...",
+    "competitive_analysis": "...",
+    "financial_analysis": "...",
+    "executive_summary": "..."
+    }
+"""
+
+    summary_prompt = PromptTemplate(
+        template=synthesis_prompt,
+        input_variables=["business", "location", "description", "market", "competition", "financial"]
+    )
+
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash",
+        temperature=0.3,
+        max_output_tokens=1200,
+        api_key=google_api_key_gemini
+    )
+
+    final_agent = create_react_agent(
+        model=llm,
+        tools=[],
+        prompt=summary_prompt
+    )
+
+    summary_response = await final_agent.ainvoke({
+            "business": business,
+            "location": location,
+            "description": description,
+            "market": json.dumps(market, indent=2),
+            "competition": json.dumps(competition, indent=2),
+            "financial": json.dumps(financial, indent=2),
+        })
+    response= summary_response
+    print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+    print(response)
+    return response
